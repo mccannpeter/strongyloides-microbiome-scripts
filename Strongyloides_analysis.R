@@ -19,11 +19,11 @@ suppressPackageStartupMessages({
 })
 
 # ------------------------------- SETTINGS -------------------------------
-COUNT_FILE <- 'count_matrix.xlsx'
+COUNT_FILE <- Sys.getenv('COUNT_FILE', unset='count_matrix.xlsx')
 META_FILE <- 'sample_metadata(1).tsv'
 MASTER_FILE <- 'Strongy microbiome summary.xlsx'
 COUNT_SHEET <- 'level-7'
-UNIFRAC_DIR <- Sys.getenv('UNIFRAC_DIR', unset=file.path('..','qiime_unifrac'))
+UNIFRAC_DIR <- Sys.getenv('UNIFRAC_DIR', unset=file.path('..','unifrac_20261111_144534_A0hDP2'))
 PREVALENCE_MIN_READS <- 5L
 PREVALENCE_MIN_FRAC <- 0.10
 VARIANCE_REMOVE_BOTTOM_FRAC <- 0.10 # Lowest 10% IQR of across-sample relative abundance
@@ -38,7 +38,7 @@ RAREFACTION_POINTS <- 26L
 RAREFACTION_SHANNON_REPEATS <- 5L # independent draws per depth; increase to 20 for smoother estimates
 RAREFACTION_MAX_DEPTH <- Inf      # set e.g. 50000 to limit computational cost
 RUN_RAREFACTION <- TRUE
-OUT <- file.path(getwd(),paste0('Strongyloides_results_',format(Sys.time(),'%Y%m%d_%H%M%S')))
+OUT <- file.path(getwd(),paste0('Strongyloides_results_',Sys.getenv('RUN_LABEL',unset='original'),'_',format(Sys.time(),'%Y%m%d_%H%M%S')))
 for (sub in c('00_QC','01_alpha','02_beta','03_dendrograms','04_heatmaps','05_cages_time','06_taxonomy','07_logs','08_rarefaction'))
   dir.create(file.path(OUT,sub),recursive=TRUE,showWarnings=FALSE)
 stopifnot(all(file.exists(c(COUNT_FILE,META_FILE,MASTER_FILE))))
@@ -82,7 +82,16 @@ parse_rank <- function(x,r) {
 }
 
 # -------------------------- LOAD + CROSS-CHECK --------------------------
-ct <- as.data.frame(readxl::read_excel(COUNT_FILE,sheet=COUNT_SHEET,.name_repair='minimal'))
+if (grepl('[.]tsv$',COUNT_FILE,ignore.case=TRUE)) {
+  # A QIIME 2 level-7 collapsed BIOM export has features in rows.
+  qiime_counts <- read.delim(COUNT_FILE,skip=1L,check.names=FALSE,quote='',comment.char='')
+  stopifnot(!anyDuplicated(qiime_counts[[1]]),!anyDuplicated(names(qiime_counts)[-1]))
+  profiles <- t(as.matrix(qiime_counts[-1]))
+  colnames(profiles) <- qiime_counts[[1]]
+  ct <- data.frame(index=rownames(profiles),profiles,check.names=FALSE)
+} else {
+  ct <- as.data.frame(readxl::read_excel(COUNT_FILE,sheet=COUNT_SHEET,.name_repair='minimal'))
+}
 stopifnot(ncol(ct)>2)
 ids <- trimws(as.character(ct[[1]]))
 if(anyDuplicated(ids) || anyNA(ids)) stop('Duplicate/missing sample IDs in count matrix')
@@ -477,7 +486,63 @@ metric_dist <- function(m,metric) switch(metric,
  'Jensen-Shannon'=jsd(m),
  'Jaccard'=vegan::vegdist((m>0)*1,method='jaccard',binary=TRUE),
  'Robust Aitchison'=vegan::vegdist(m,method='robust.aitchison'))
-plot_beta <- function(df,group,stem,colors=NULL,strata=NULL) {
+# Enumerate every allocation of the observed number of infected cages.
+# Use the same allocation for every sample belonging to a cage.
+cage_permanova <- function(d, df, days, subset_label) {
+  keep <- which(df$Day %in% days)
+  dat <- df[keep,,drop=FALSE]
+  cage <- factor(dat$Cage)
+  day <- factor(dat$Day)
+  stopifnot(!anyNA(cage), !anyNA(day), nlevels(day)>1L,
+            !anyDuplicated(data.frame(cage,day)))
+  observed <- vapply(split(as.character(dat$Infection),cage),function(x) {
+    stopifnot(length(unique(x))==1L)
+    x[1]
+  },character(1)) == 'Infected'
+  stopifnot(any(observed),any(!observed))
+  allocations <- combn(nlevels(cage),sum(observed),simplify=FALSE)
+  observed_allocation <- which(observed)
+  # Gower-centred matrix from the selected samples' original distances.
+  sq <- as.matrix(d)[keep,keep,drop=FALSE]^2
+  means <- rowMeans(sq)
+  gower <- -.5*(sweep(sweep(sq,1,means,'-'),2,means,'-')+mean(sq))
+  total <- sum(diag(gower))
+  day_design <- model.matrix(~day)
+  interaction_design <- model.matrix(~cage+day)
+  day_indicators <- day_design[,-1,drop=FALSE]
+  projection_ss <- function(design) {
+    decomp <- qr(design)
+    q <- qr.Q(decomp)[,seq_len(decomp$rank),drop=FALSE]
+    c(ss=sum(q*(gower %*% q)),rank=decomp$rank)
+  }
+  test <- function(term, reduced, added) {
+    null <- projection_ss(reduced)
+    statistic <- function(infected) {
+      label <- as.integer(as.integer(cage) %in% infected)
+      full <- projection_ss(cbind(reduced,added(label)))
+      effect <- full[['ss']]-null[['ss']]
+      df_term <- full[['rank']]-null[['rank']]
+      df_res <- nrow(dat)-full[['rank']]
+      residual <- total-full[['ss']]
+      if (df_term<=0L || df_res<=0L || residual<=0 || total<=0)
+        stop('Cage-level PERMANOVA has nonpositive residual variation or degrees of freedom.')
+      c(F=(effect/df_term)/(residual/df_res),R2=effect/total,
+        Partial_R2=effect/(effect+residual),Df=df_term,Residual_Df=df_res)
+    }
+    result <- statistic(observed_allocation)
+    null_f <- vapply(allocations,function(a) statistic(a)[['F']],numeric(1))
+    tolerance <- 1e-10*max(1,abs(result[['F']]))
+    data.frame(term=term,subset=subset_label,N=nrow(dat),Cages=nlevels(cage),
+               Allocations=length(allocations),as.list(result),check.names=FALSE,
+               'Pr(>F)'=mean(null_f>=result[['F']]-tolerance))
+  }
+  bind_rows(
+    test('Infection',day_design,function(label) label),
+    test('Infection x Day',interaction_design,function(label) day_indicators*label)
+  )
+}
+
+plot_beta <- function(df,group,stem,colors=NULL,strata=NULL,cage_test=FALSE) {
   df <- df %>% filter(!is.na(.data[[group]]))
   if(nrow(df)<4 || n_distinct(df[[group]])<2) return(invisible(NULL))
   m <- tss[df$SampleID,,drop=FALSE]
@@ -510,6 +575,11 @@ plot_beta <- function(df,group,stem,colors=NULL,strata=NULL) {
       a <- a+stat_ellipse(aes(group=.data[[group]]),level=.95,linewidth=.65,show.legend=FALSE)
     plist[[metric]] <- a
     adform <- as.formula(paste('d ~',group))
+    if (cage_test) {
+      full <- cage_permanova(d,df,unique(df$Day),'All retained days')
+      balanced <- cage_permanova(d,df,c(12,22,32),'Balanced days 12, 22 and 32')
+      tables[[metric]] <- data.frame(metric=metric,bind_rows(full,balanced),check.names=FALSE)
+    } else {
     if(!is.null(strata) && strata%in%names(df)) {
       # Restrict permutations within cage, when repeated samples share biological units.
       res <- tryCatch(vegan::adonis2(adform,data=df,permutations=PERMUTATIONS,
@@ -517,19 +587,30 @@ plot_beta <- function(df,group,stem,colors=NULL,strata=NULL) {
     } else res <- tryCatch(vegan::adonis2(adform,data=df,permutations=PERMUTATIONS),error=function(e)e)
     if(!inherits(res,'error')) tables[[metric]] <- data.frame(metric=metric,term=rownames(res),res,check.names=FALSE)
     else note('PERMANOVA failure ',stem,' ',metric,': ',conditionMessage(res))
-    bd <- tryCatch(vegan::betadisper(d,df[[group]]),error=function(e)NULL)
-    if(!is.null(bd)) {
+    }
+    if (!cage_test) {
+      bd <- tryCatch(vegan::betadisper(d,df[[group]]),error=function(e)NULL)
+      if (!is.null(bd)) {
       bt <- tryCatch(vegan::permutest(bd,permutations=PERMUTATIONS),error=function(e)NULL)
       if(!is.null(bt)) dispt[[metric]] <- data.frame(metric=metric,p=bt$tab[1,'Pr(>F)'])
+      }
     }
     safe_write(coords,'02_beta',paste0(stem,'_',gsub('[^A-Za-z]','',metric),'_coordinates'))
   }
   if (length(tables)) {
     omnibus <- bind_rows(tables)
     omnibus$p_adjusted <- NA_real_
-    model_rows <- which(omnibus$term %in% c('Model',group))
-    omnibus$p_adjusted[model_rows] <- p.adjust(omnibus[['Pr(>F)']][model_rows],
-                                              method='holm',n=length(metrics))
+    if (cage_test) {
+      families <- split(seq_len(nrow(omnibus)),interaction(omnibus$term,omnibus$subset))
+      for (i in families) {
+        omnibus$p_adjusted[i] <- p.adjust(omnibus[['Pr(>F)']][i],method='holm',n=length(metrics))
+      }
+      model_rows <- which(omnibus$term=='Infection' & omnibus$subset=='All retained days')
+    } else {
+      model_rows <- which(omnibus$term %in% c('Model',group))
+      omnibus$p_adjusted[model_rows] <- p.adjust(omnibus[['Pr(>F)']][model_rows],
+                                                method='holm',n=length(metrics))
+    }
     for (i in model_rows) {
       p_value <- omnibus$p_adjusted[i]
       if (is.finite(p_value)) {
@@ -546,7 +627,7 @@ plot_beta <- function(df,group,stem,colors=NULL,strata=NULL) {
        theme(legend.position='bottom'),'02_beta',stem,width=19,height=if(length(plist)>3L) 13 else 7.6)
   if(length(dispt)) safe_write(bind_rows(dispt),'02_beta',paste0(stem,'_dispersion'))
 }
-plot_beta(meta %>% filter(Category=='Host faeces'),'Infection','Host_infection_beta',pal_status)
+plot_beta(meta %>% filter(Category=='Host faeces'),'Infection','Host_infection_beta',pal_status,cage_test=TRUE)
 plot_beta(meta %>% filter(Category=='Host faeces') %>% mutate(Day=factor(Day,levels=c(1,12,22,32))),
           'Day','Host_day_beta')
 plot_beta(meta %>% filter(Category=='Nematode'),'Stage','Nematode_life_stage_beta',pal_stage)
@@ -695,8 +776,10 @@ for (path in figure_files) {
       '* adjusted P < 0.05, ** < 0.01, *** < 0.001, **** < 0.0001. See the paired table for tested groups and sample sizes.'),
     '02_beta'=c('Each point is a retained sample. Axes show principal coordinates and their percentages of positive eigenvalue variation.',
       'Bray-Curtis, square-root Jensen-Shannon, binary Jaccard and robust Aitchison use filtered profiles. Both UniFrac metrics use the full DADA2 table and rooted tree, matched by sample ID.',
-      paste('PERMANOVA uses',PERMUTATIONS,'permutations. Holm adjusts over six distances per comparison. Dispersion tests are reported separately.'),
-      if (grepl('cage_blocked',stem)) 'Day permutations are restricted within cage.' else 'PERMANOVA permutations are unrestricted.',
+      if (stem=='Host_infection_beta') 'The subtitle shows the exact whole-cage infection test adjusted for sampling day. Holm adjusts over six distances per term and sample subset.'
+      else paste('PERMANOVA uses',PERMUTATIONS,'permutations. Holm adjusts over six distances per comparison. Dispersion tests are reported separately.'),
+      if (stem=='Host_infection_beta') 'Infection labels were reassigned among whole cages, with day accounted for.'
+      else if (grepl('cage_blocked',stem)) 'Day permutations are restricted within cage.' else 'PERMANOVA permutations are unrestricted.',
       'Ellipses show the 95% group data ellipse where estimable. Stars use the same adjusted thresholds as alpha plots.'),
     '03_dendrograms'='Tips are retained samples. Height is Bray-Curtis dissimilarity with average linkage on filtered relative-abundance profiles. The leaf-order table lists plotted samples.',
     '04_heatmaps'=paste('Rows are up to',TOP_GENERA,'genera ranked by mean relative abundance. Columns are samples. Colours are within-genus z-scores of log10(relative abundance + 0.00001). Both axes are clustered.'),
@@ -804,7 +887,8 @@ readme <- c(
  'Dendrograms: Bray-Curtis dissimilarity, average linkage, filtered TSS profiles. Workbook: Supplementary_Tables.xlsx.',
  'Weighted and unweighted UniFrac use the full DADA2 feature table and rooted tree in QIIME 2. R subsets distances by sample ID to the retained samples. The other four metrics use filtered features. Robust Aitchison uses robust centered log-ratio transformation without a pseudocount.',
  'PERMANOVA p-values are Holm-adjusted across the six metrics within each comparison.',
- 'PERMANOVA: 999 permutations; inspect beta dispersion before attributing differences to centroids.',
+ 'Infection PERMANOVA: exact whole-cage label reassignment; day-adjusted infection and cage-adjusted infection-by-day tests, with a balanced days 12/22/32 sensitivity analysis.',
+ 'Other PERMANOVAs: 999 permutations; inspect beta dispersion before attributing differences to centroids.',
  'Cage-blocked day PERMANOVA included as exploratory analysis; does not make technical replicates independent.',
  'Nematode replicates may be technical/nested-PCR replicates; stage and wash comparisons are exploratory.',
  'Outputs PDF (vector) and high-resolution PNG. Font default 16 pt; edit BASE_FONT if needed.',
