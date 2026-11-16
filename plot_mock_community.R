@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+# Purpose: Plot the mock community sequencing results.
 # Rscript plot_mock_community.R [count_matrix.xlsx] [output_directory]
 args <- commandArgs(trailingOnly=TRUE)
 input <- if(length(args)) args[1] else 'count_matrix.xlsx'

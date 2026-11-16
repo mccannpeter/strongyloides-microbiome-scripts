@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+# Purpose: Screen ASVs for contamination and export filtered counts and UniFrac distances.
 # Run from the study directory. Input paths can be supplied through environment variables.
 args <- commandArgs(trailingOnly=TRUE)
 if (length(args)>2L)

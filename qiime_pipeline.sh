@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Purpose: Process paired-end 16S reads or calculate UniFrac from existing DADA2 outputs.
 # Run from the study directory with the QIIME 2 environment active.
 set -euo pipefail
 

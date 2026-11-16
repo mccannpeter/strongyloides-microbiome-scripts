@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+# Purpose: Run the statistical analyses and generate figures and tables.
 # Strongyloides 16S rRNA analysis, reproducible single-directory workflow
 # Run: setwd('directory_containing_all_four_inputs'); source('Strongyloides_analysis.R')
 # Or: Rscript Strongyloides_analysis.R

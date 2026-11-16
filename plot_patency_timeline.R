@@ -1,4 +1,5 @@
 #!/usr/bin/env Rscript
+# Purpose: Plot faecal egg counts alongside the microbiome sampling days.
 # Rscript plot_patency_timeline.R [workbook.xlsx] [output_directory]
 args <- commandArgs(trailingOnly=TRUE)
 workbook <- if (length(args) >= 1L) args[1] else 'Strongy microbiome summary.xlsx'
