@@ -3,7 +3,7 @@
 args <- commandArgs(trailingOnly=TRUE)
 if (length(args)>2L)
   stop('Usage: Rscript run_decontam_phyloseq.R [new_output_dir] [batch_map.tsv]')
-out <- if(length(args)) args[1] else 'decontam_phyloseq'
+out <- if(length(args)) args[1] else 'decontam_phyloseq_D1C4'
 batch_file <- if(length(args)==2L) args[2] else ''
 input <- c(
   table=Sys.getenv('ASV_TABLE',unset='table-dada2.qza'),
@@ -61,6 +61,8 @@ data <- read_inputs(input)
 meta <- read.csv(input[['metadata']],check.names=FALSE)
 stopifnot(all(c('SampleID','Category','Excluded') %in% names(meta)),!anyDuplicated(meta$SampleID))
 blank_ids <- c('K1','K2','kitome_pmcc_1','kitome_pmcc_2','kitome_pmcc_3')
+# Restore the previously excluded day 1 cage sample before fitting decontam.
+meta[['Excluded']][meta[['SampleID']]=='D1C4'] <- FALSE
 positive_ids <- meta$SampleID[which(!meta$Excluded & meta$Category %in% c('Host faeces','Nematode'))]
 selected <- c(blank_ids,positive_ids)
 missing <- setdiff(selected,colnames(data$counts))
